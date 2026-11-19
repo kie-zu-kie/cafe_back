@@ -1,0 +1,6 @@
+# Python dependencies for the Flask backend.
+Flask>=3.0,<4.0
+gunicorn>=22,<24
+psycopg2-binary>=2.9,<3
+python-dotenv>=1.0,<2
+
