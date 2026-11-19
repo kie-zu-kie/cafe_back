@@ -33,14 +33,14 @@ if os.getenv("DATABASE_URL"):
 
 
 @app.after_request
-def allow_local_frontend(response):
+def allow_frontend_origin(response):
     if request.path.startswith("/api/"):
         request_origin = request.headers.get("Origin")
         configured = os.getenv(
             "FRONTEND_ORIGIN",
             "http://127.0.0.1:8000",
         )
-        allowed_origins = {
+        allowed_origins = {"https://cafe-front-ten.vercel.app"} | {
             origin.strip().rstrip("/")
             for origin in configured.split(",")
             if origin.strip()
