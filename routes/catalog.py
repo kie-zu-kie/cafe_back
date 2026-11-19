@@ -1,15 +1,16 @@
 import os
-from uuid import uuid4
+from io import BytesIO
 
 import psycopg2
-from flask import Blueprint, current_app, jsonify, request
+from psycopg2.extras import RealDictCursor
+from flask import Blueprint, jsonify, request, send_file
 
 try:
     from ..common import manager_required, product_response, validate_json
-    from ..database import query
+    from ..database import get_connection, query
 except ImportError:
     from common import manager_required, product_response, validate_json
-    from database import query
+    from database import get_connection, query
 
 bp = Blueprint("catalog", __name__)
 ALLOWED_IMAGE_EXTENSIONS = {
@@ -22,6 +23,11 @@ IMAGE_SIGNATURES = {
     "jpeg": lambda data: data.startswith(b"\xff\xd8\xff"),
     "png": lambda data: data.startswith(b"\x89PNG\r\n\x1a\n"),
     "webp": lambda data: data.startswith(b"RIFF") and data[8:12] == b"WEBP",
+}
+IMAGE_MIME_TYPES = {
+    "jpeg": "image/jpeg",
+    "png": "image/png",
+    "webp": "image/webp",
 }
 
 
@@ -90,6 +96,26 @@ def delete_product(product_id):
     return "", 204
 
 
+@bp.get("/api/products/<int:product_id>/image")
+def product_image(product_id):
+    with get_connection() as connection:
+        with connection.cursor(cursor_factory=RealDictCursor) as cursor:
+            cursor.execute(
+                "SELECT mime_type, image_data FROM product_images WHERE product_id = %s",
+                (product_id,),
+            )
+            image = cursor.fetchone()
+    if not image:
+        return jsonify(error="Product image not found"), 404
+    response = send_file(
+        BytesIO(bytes(image["image_data"])),
+        mimetype=image["mime_type"],
+    )
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    return response
+
+
 @bp.post("/api/products/<int:product_id>/image")
 def upload_product_image(product_id):
     error = manager_required()
@@ -110,44 +136,44 @@ def upload_product_image(product_id):
     if not IMAGE_SIGNATURES[image_type](signature):
         return jsonify(error="The uploaded file is not a valid image"), 400
 
-    rows = query(
-        "SELECT image_url FROM products WHERE product_id = %s",
-        (product_id,),
-    )
-    if not rows:
-        return jsonify(error="Product not found"), 404
-
-    upload_folder = os.path.join(current_app.static_folder, "uploads", "products")
-    os.makedirs(upload_folder, exist_ok=True)
-    filename = f"{uuid4().hex}{extension}"
-    image_path = os.path.join(upload_folder, filename)
+    image_data = image.stream.read()
     public_backend_url = (
         os.getenv("PUBLIC_BACKEND_URL", "").strip().rstrip("/")
         or request.host_url.rstrip("/")
     )
-    image_url = f"{public_backend_url}/static/uploads/products/{filename}"
-    image.save(image_path)
-
-    try:
-        updated = query(
-            "UPDATE products SET image_url = %s WHERE product_id = %s "
-            "RETURNING product_id AS id, product_name AS name, description, price, category, unit, image_url",
-            (image_url, product_id),
-        )
-    except psycopg2.Error:
-        os.remove(image_path)
-        raise
+    image_url = f"{public_backend_url}/api/products/{product_id}/image"
+    with get_connection() as connection:
+        with connection.cursor(cursor_factory=RealDictCursor) as cursor:
+            cursor.execute(
+                "SELECT product_id FROM products WHERE product_id = %s FOR UPDATE",
+                (product_id,),
+            )
+            if not cursor.fetchone():
+                return jsonify(error="Product not found"), 404
+            cursor.execute(
+                """
+                INSERT INTO product_images (product_id, mime_type, image_data)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (product_id) DO UPDATE
+                SET mime_type = EXCLUDED.mime_type,
+                    image_data = EXCLUDED.image_data,
+                    uploaded_at = CURRENT_TIMESTAMP
+                """,
+                (
+                    product_id,
+                    IMAGE_MIME_TYPES[image_type],
+                    psycopg2.Binary(image_data),
+                ),
+            )
+            cursor.execute(
+                "UPDATE products SET image_url = %s WHERE product_id = %s "
+                "RETURNING product_id AS id, product_name AS name, description, price, category, unit, image_url",
+                (image_url, product_id),
+            )
+            updated = cursor.fetchone()
     if not updated:
-        os.remove(image_path)
         return jsonify(error="Product not found"), 404
-
-    previous_url = rows[0].get("image_url")
-    if previous_url and previous_url.startswith("/static/uploads/products/"):
-        previous_path = os.path.join(upload_folder, os.path.basename(previous_url))
-        if os.path.isfile(previous_path) and previous_path != image_path:
-            os.remove(previous_path)
-
-    return jsonify(product_response(updated[0]))
+    return jsonify(product_response(dict(updated)))
 
 
 @bp.get("/api/customers")

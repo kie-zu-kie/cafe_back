@@ -32,6 +32,13 @@ CREATE TABLE IF NOT EXISTS products (
     is_available BOOLEAN NOT NULL DEFAULT TRUE
 );
 
+CREATE TABLE IF NOT EXISTS product_images (
+    product_id INTEGER PRIMARY KEY REFERENCES products(product_id) ON DELETE CASCADE,
+    mime_type VARCHAR(30) NOT NULL,
+    image_data BYTEA NOT NULL,
+    uploaded_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS inventory (
     inventory_id SERIAL PRIMARY KEY,
     product_id INTEGER UNIQUE REFERENCES products(product_id) ON DELETE CASCADE,
